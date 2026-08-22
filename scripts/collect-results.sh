@@ -1,0 +1,94 @@
+#!/usr/bin/env zsh
+# collect-results.sh — Recupera resultados de EcoFloc de cada worker a muaddib
+# Uso: ./collect-results.sh <experimento>
+# Ejemplo: ./collect-results.sh exp01
+
+set -euo pipefail
+
+# ─── Cargar .env ──────────────────────────────────────────────────────────────
+ENV_FILE="$(dirname $0)/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+    echo "ERROR: no se encontró .env en $(dirname $0)"
+    exit 1
+fi
+source "$ENV_FILE"
+
+# ─── Parámetros ───────────────────────────────────────────────────────────────
+if [[ $# -ne 1 ]]; then
+    echo "Uso: $0 <experimento>"
+    echo "Ejemplo: $0 exp01"
+    exit 1
+fi
+
+EXP_NAME=$1
+REMOTE_EXP_DIR="${RESULTS_REMOTE_DIR}/${EXP_NAME}"
+LOCAL_EXP_DIR="${RESULTS_LOCAL_DIR}/${EXP_NAME}"
+
+echo "========================================="
+echo " Recuperando resultados: $EXP_NAME"
+echo " Origen (workers): $REMOTE_EXP_DIR"
+echo " Destino (muaddib): $LOCAL_EXP_DIR"
+echo "========================================="
+
+# ─── Construir mapeo nombre→IP desde .env ─────────────────────────────────────
+declare -A NODE_IP
+
+i=1
+while true; do
+    NAME_VAR="NODE_${i}_NAME"
+    IP_VAR="NODE_${i}_IP"
+    NAME="${(P)NAME_VAR:-}"
+    IP="${(P)IP_VAR:-}"
+    [[ -z "$NAME" || -z "$IP" ]] && break
+    NODE_IP[$NAME]=$IP
+    (( i++ ))
+done
+
+if [[ ${#NODE_IP[@]} -eq 0 ]]; then
+    echo "ERROR: no se encontraron nodos en .env"
+    exit 1
+fi
+
+# ─── Copiar resultados de cada worker ─────────────────────────────────────────
+echo ""
+echo "[ Recuperando archivos ]"
+
+TOTAL_FILES=0
+
+for NODE in "${(@k)NODE_IP}"; do
+    IP=${NODE_IP[$NODE]}
+    LOCAL_NODE_DIR="${LOCAL_EXP_DIR}/${NODE}"
+
+    # Verificar que existe el directorio remoto
+    if ! sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no josec@$IP \
+        "test -d $REMOTE_EXP_DIR" 2>/dev/null; then
+        echo "  ⚠ $NODE — sin resultados en $REMOTE_EXP_DIR, se omite"
+        continue
+    fi
+
+    # Contar archivos remotos
+    N_FILES=$(sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no josec@$IP \
+        "ls ${REMOTE_EXP_DIR}/*.csv 2>/dev/null | wc -l")
+
+    if [[ $N_FILES -eq 0 ]]; then
+        echo "  ⚠ $NODE — directorio vacío, se omite"
+        continue
+    fi
+
+    # Crear directorio local para este nodo
+    mkdir -p "$LOCAL_NODE_DIR"
+
+    # Copiar via scp (comillas para que el glob se expanda en el worker)
+    sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
+        "josec@$IP:${REMOTE_EXP_DIR}/*.csv" "$LOCAL_NODE_DIR/"
+
+    echo "  ✓ $NODE — $N_FILES archivo(s) copiado(s) → $LOCAL_NODE_DIR"
+    (( TOTAL_FILES += N_FILES ))
+done
+
+echo ""
+echo "[ Archivos recuperados: $TOTAL_FILES ]"
+echo ""
+ls -lh "${LOCAL_EXP_DIR}"/*/
+echo ""
+echo "✓ Colección completada — $LOCAL_EXP_DIR"
