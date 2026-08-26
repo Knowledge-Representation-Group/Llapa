@@ -1,34 +1,35 @@
 #!/usr/bin/env zsh
-# experiment.sh — Lanza run-ecofloc.sh en todos los workers con pods TeaStore
-# Uso: ./experiment.sh <experimento> <duración_s> <intervalo_ms> <componentes>
-# Ejemplo: ./experiment.sh exp01 60 1000 cpu,ram,sd,nic
+# run-ecofloc-wide.sh — Lanza run-ecofloc.sh en todos los workers con pods TeaStore
+# Uso: ./run-ecofloc-wide.sh <experimento> <intervalo_ms> <componentes>
+# Ejemplo: ./run-ecofloc-wide.sh exp01 1000 cpu,ram,sd,nic
+# Modo continuo: corre hasta que el orquestador envíe señal de parada (.stop)
 
 set -euo pipefail
 
 # ─── Cargar .env ──────────────────────────────────────────────────────────────
-ENV_FILE="$(dirname $0)/.env"
+ENV_FILE="${0:A:h}/../../.env"
 if [[ ! -f "$ENV_FILE" ]]; then
-    echo "ERROR: no se encontró .env en $(dirname $0)"
+    echo "ERROR: no se encontró .env en ${0:A:h}"
     exit 1
 fi
 source "$ENV_FILE"
 
 # ─── Parámetros ───────────────────────────────────────────────────────────────
-if [[ $# -ne 4 ]]; then
-    echo "Uso: $0 <experimento> <duración_s> <intervalo_ms> <componentes>"
+if [[ $# -ne 3 ]]; then
+    echo "Uso: $0 <experimento> <intervalo_ms> <componentes>"
+    echo "Ejemplo: $0 exp01 1000 cpu,ram,sd,nic"
     exit 1
 fi
 
 EXP_NAME=$1
-DURATION=$2
-INTERVAL=$3
-COMPONENTS=$4
+INTERVAL=$2
+COMPONENTS=$3
 
-SCRIPT_REMOTE="/home/josec/utils-scripts/run-ecofloc.sh"
+SCRIPT_REMOTE="${REMOTE_SCRIPT_DIR}/run-ecofloc.sh"
 
 echo "========================================="
-echo " Experimento: $EXP_NAME"
-echo " Duración: ${DURATION}s | Intervalo: ${INTERVAL}ms"
+echo " EcoFloc Wide — Experimento: $EXP_NAME"
+echo " Intervalo: ${INTERVAL}ms | Modo: continuo"
 echo " Componentes: $COMPONENTS"
 echo "========================================="
 
@@ -57,33 +58,15 @@ for NODE in "${(@k)NODE_IP}"; do
     echo "  · $NODE (${NODE_IP[$NODE]})"
 done
 
-# ─── Detectar workers con pods TeaStore activos ───────────────────────────────
-echo ""
-echo "[ Detectando workers con pods TeaStore ]"
-
-typeset -a ACTIVE_WORKERS
-
-while IFS= read -r NODE; do
-    if [[ -n "${NODE_IP[$NODE]+_}" ]]; then
-        ACTIVE_WORKERS+=($NODE)
-        echo "  ✓ $NODE (${NODE_IP[$NODE]})"
-    fi
-done < <(kubectl get pods -n teastore -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u)
-
-if [[ ${#ACTIVE_WORKERS[@]} -eq 0 ]]; then
-    echo "  ✗ No hay workers con pods TeaStore activos"
-    exit 1
-fi
-
 # ─── Verificar que run-ecofloc.sh existe en cada worker ──────────────────────
 echo ""
 echo "[ Verificando run-ecofloc.sh en workers ]"
 
 typeset -a VALID_WORKERS
 
-for NODE in "${ACTIVE_WORKERS[@]}"; do
+for NODE in "${(@k)NODE_IP}"; do
     IP=${NODE_IP[$NODE]}
-    if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no josec@$IP "test -f $SCRIPT_REMOTE"; then
+    if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP "test -f $SCRIPT_REMOTE"; then
         VALID_WORKERS+=($NODE)
         echo "  ✓ $NODE — script encontrado"
     else
@@ -106,18 +89,30 @@ typeset -a BGPIDS
 for NODE in "${VALID_WORKERS[@]}"; do
     IP=${NODE_IP[$NODE]}
     echo "  → SSH $NODE ($IP)"
-    sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no josec@$IP \
-        "bash $SCRIPT_REMOTE $EXP_NAME $DURATION $INTERVAL $COMPONENTS $SUDO_PASS" &
+    sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
+        "bash $SCRIPT_REMOTE $EXP_NAME $INTERVAL $COMPONENTS $SUDO_PASS" &
     BGPIDS+=($!)
 done
 
 echo ""
-echo "[ Midiendo durante ${DURATION}s... esperando workers ]"
+echo "[ EcoFloc corriendo en modo continuo en ${#VALID_WORKERS[@]} worker(s) ]"
+echo "[ Esperando señal de parada desde el orquestador... ]"
 
+# ─── Lanzar también localmente (control-plane) ────────────────────────────────
+LOCAL_SCRIPT="${0:A:h}/run-ecofloc.sh"
+if [[ -f "$LOCAL_SCRIPT" ]]; then
+    echo "  → LOCAL (control-plane)"
+    bash "$LOCAL_SCRIPT" "$EXP_NAME" "$INTERVAL" "$COMPONENTS" "" &
+    BGPIDS+=($!)
+else
+    echo "  ⚠ run-ecofloc.sh no encontrado localmente — control-plane no se medirá"
+fi
+
+# ─── Esperar a que todos los workers terminen (señal llegará vía .stop) ───────
 for BGPID in "${BGPIDS[@]}"; do
     wait $BGPID 2>/dev/null || true
 done
 
 echo ""
-echo "✓ Experimento $EXP_NAME completado"
-echo "  Resultados en /home/josec/results/$EXP_NAME/ en cada worker"
+echo "✓ EcoFloc completado en todos los workers"
+echo "  Resultados en ${RESULTS_REMOTE_DIR}/$EXP_NAME/ en cada worker"

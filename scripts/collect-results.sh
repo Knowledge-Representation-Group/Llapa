@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# collect-results.sh — Recupera resultados de EcoFloc de cada worker a muaddib
+# collect-results.sh — Recupera resultados de EcoFloc de cada worker al control-plane
 # Uso: ./collect-results.sh <experimento>
 # Ejemplo: ./collect-results.sh exp01
 
@@ -27,7 +27,7 @@ LOCAL_EXP_DIR="${RESULTS_LOCAL_DIR}/${EXP_NAME}"
 echo "========================================="
 echo " Recuperando resultados: $EXP_NAME"
 echo " Origen (workers): $REMOTE_EXP_DIR"
-echo " Destino (muaddib): $LOCAL_EXP_DIR"
+echo " Destino (local): $LOCAL_EXP_DIR"
 echo "========================================="
 
 # ─── Construir mapeo nombre→IP desde .env ─────────────────────────────────────
@@ -59,15 +59,13 @@ for NODE in "${(@k)NODE_IP}"; do
     IP=${NODE_IP[$NODE]}
     LOCAL_NODE_DIR="${LOCAL_EXP_DIR}/${NODE}"
 
-    # Verificar que existe el directorio remoto
-    if ! sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no josec@$IP \
+    if ! sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
         "test -d $REMOTE_EXP_DIR" 2>/dev/null; then
         echo "  ⚠ $NODE — sin resultados en $REMOTE_EXP_DIR, se omite"
         continue
     fi
 
-    # Contar archivos remotos
-    N_FILES=$(sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no josec@$IP \
+    N_FILES=$(sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
         "ls ${REMOTE_EXP_DIR}/*.csv 2>/dev/null | wc -l")
 
     if [[ $N_FILES -eq 0 ]]; then
@@ -75,20 +73,44 @@ for NODE in "${(@k)NODE_IP}"; do
         continue
     fi
 
-    # Crear directorio local para este nodo
     mkdir -p "$LOCAL_NODE_DIR"
 
-    # Copiar via scp (comillas para que el glob se expanda en el worker)
     sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
-        "josec@$IP:${REMOTE_EXP_DIR}/*.csv" "$LOCAL_NODE_DIR/"
+        "${SSH_USER}@$IP:${REMOTE_EXP_DIR}/*.csv" "$LOCAL_NODE_DIR/"
+
+    if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
+        "test -f ${REMOTE_EXP_DIR}/pid_map.json" 2>/dev/null; then
+        sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
+            "${SSH_USER}@$IP:${REMOTE_EXP_DIR}/pid_map.json" \
+            "$LOCAL_NODE_DIR/"
+    fi
 
     echo "  ✓ $NODE — $N_FILES archivo(s) copiado(s) → $LOCAL_NODE_DIR"
     (( TOTAL_FILES += N_FILES ))
 done
 
+# ─── Copiar resultados locales del control-plane ──────────────────────────────
+LOCAL_NODE_NAME=$(hostname 2>/dev/null || cat /etc/hostname || echo "control-plane")
+LOCAL_CONTROLPLANE_DIR="${RESULTS_REMOTE_DIR}/${EXP_NAME}"
+LOCAL_NODE_DIR="${LOCAL_EXP_DIR}/${LOCAL_NODE_NAME}"
+
+if [[ -d "$LOCAL_CONTROLPLANE_DIR" ]]; then
+    N_FILES=$(ls ${LOCAL_CONTROLPLANE_DIR}/*.csv 2>/dev/null | wc -l)
+    if [[ $N_FILES -gt 0 ]]; then
+        mkdir -p "$LOCAL_NODE_DIR"
+        cp ${LOCAL_CONTROLPLANE_DIR}/*.csv "$LOCAL_NODE_DIR/"
+        if [[ -f "${LOCAL_CONTROLPLANE_DIR}/pid_map.json" ]]; then
+            cp "${LOCAL_CONTROLPLANE_DIR}/pid_map.json" "$LOCAL_NODE_DIR/"
+        fi
+        echo "  ✓ $LOCAL_NODE_NAME (local) — $N_FILES archivo(s) copiado(s) → $LOCAL_NODE_DIR"
+        (( TOTAL_FILES += N_FILES ))
+    else
+        echo "  ⚠ $LOCAL_NODE_NAME (local) — sin CSVs en $LOCAL_CONTROLPLANE_DIR"
+    fi
+else
+    echo "  ⚠ $LOCAL_NODE_NAME (local) — directorio no encontrado: $LOCAL_CONTROLPLANE_DIR"
+fi
+
 echo ""
 echo "[ Archivos recuperados: $TOTAL_FILES ]"
-echo ""
-ls -lh "${LOCAL_EXP_DIR}"/*/
-echo ""
 echo "✓ Colección completada — $LOCAL_EXP_DIR"
