@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# collect-results.sh — Recupera resultados de EcoFloc de cada worker al control-plane
+# collect-results.sh — Recupera resultados de EcoFloc y Scaphandre de cada worker
 # Uso: ./collect-results.sh <experimento>
 # Ejemplo: ./collect-results.sh exp01
 
@@ -51,7 +51,7 @@ fi
 
 # ─── Copiar resultados de cada worker ─────────────────────────────────────────
 echo ""
-echo "[ Recuperando archivos ]"
+echo "[ Recuperando archivos EcoFloc ]"
 
 TOTAL_FILES=0
 
@@ -68,29 +68,38 @@ for NODE in "${(@k)NODE_IP}"; do
     N_FILES=$(sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
         "ls ${REMOTE_EXP_DIR}/*.csv 2>/dev/null | wc -l")
 
-    if [[ $N_FILES -eq 0 ]]; then
-        echo "  ⚠ $NODE — directorio vacío, se omite"
-        continue
-    fi
-
-    mkdir -p "$LOCAL_NODE_DIR"
-
-    sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
-        "${SSH_USER}@$IP:${REMOTE_EXP_DIR}/*.csv" "$LOCAL_NODE_DIR/"
-
-    if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
-        "test -f ${REMOTE_EXP_DIR}/pid_map.json" 2>/dev/null; then
+    if [[ $N_FILES -gt 0 ]]; then
+        mkdir -p "$LOCAL_NODE_DIR"
         sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
-            "${SSH_USER}@$IP:${REMOTE_EXP_DIR}/pid_map.json" \
-            "$LOCAL_NODE_DIR/"
+            "${SSH_USER}@$IP:${REMOTE_EXP_DIR}/*.csv" "$LOCAL_NODE_DIR/"
+
+        if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
+            "test -f ${REMOTE_EXP_DIR}/pid_map.json" 2>/dev/null; then
+            sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
+                "${SSH_USER}@$IP:${REMOTE_EXP_DIR}/pid_map.json" \
+                "$LOCAL_NODE_DIR/"
+        fi
+
+        echo "  ✓ $NODE — $N_FILES CSV(s) copiado(s) → $LOCAL_NODE_DIR"
+        (( TOTAL_FILES += N_FILES ))
+    else
+        echo "  ⚠ $NODE — sin CSVs, se omite EcoFloc"
     fi
 
-    echo "  ✓ $NODE — $N_FILES archivo(s) copiado(s) → $LOCAL_NODE_DIR"
-    (( TOTAL_FILES += N_FILES ))
+    # ─── Copiar scaphandre JSON si existe ─────────────────────────────────────
+    if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no ${SSH_USER}@$IP \
+        "test -d ${REMOTE_EXP_DIR}/scaphandre" 2>/dev/null; then
+        mkdir -p "${LOCAL_EXP_DIR}/scaphandre"
+        sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
+            "${SSH_USER}@$IP:${REMOTE_EXP_DIR}/scaphandre/*.json" \
+            "${LOCAL_EXP_DIR}/scaphandre/" 2>/dev/null && \
+            echo "  ✓ $NODE — scaphandre JSON copiado → ${LOCAL_EXP_DIR}/scaphandre/" || \
+            echo "  ⚠ $NODE — sin JSON de scaphandre"
+    fi
 done
 
 # ─── Copiar resultados locales del control-plane ──────────────────────────────
-LOCAL_NODE_NAME=$(hostname 2>/dev/null || cat /etc/hostname || echo "control-plane")
+LOCAL_NODE_NAME=$(cat /etc/hostname 2>/dev/null || echo "control-plane")
 LOCAL_CONTROLPLANE_DIR="${RESULTS_REMOTE_DIR}/${EXP_NAME}"
 LOCAL_NODE_DIR="${LOCAL_EXP_DIR}/${LOCAL_NODE_NAME}"
 
@@ -102,15 +111,24 @@ if [[ -d "$LOCAL_CONTROLPLANE_DIR" ]]; then
         if [[ -f "${LOCAL_CONTROLPLANE_DIR}/pid_map.json" ]]; then
             cp "${LOCAL_CONTROLPLANE_DIR}/pid_map.json" "$LOCAL_NODE_DIR/"
         fi
-        echo "  ✓ $LOCAL_NODE_NAME (local) — $N_FILES archivo(s) copiado(s) → $LOCAL_NODE_DIR"
+        echo "  ✓ $LOCAL_NODE_NAME (local) — $N_FILES CSV(s) copiado(s) → $LOCAL_NODE_DIR"
         (( TOTAL_FILES += N_FILES ))
     else
         echo "  ⚠ $LOCAL_NODE_NAME (local) — sin CSVs en $LOCAL_CONTROLPLANE_DIR"
+    fi
+
+    # Scaphandre local (muaddib)
+    if [[ -d "${LOCAL_CONTROLPLANE_DIR}/scaphandre" ]]; then
+        mkdir -p "${LOCAL_EXP_DIR}/scaphandre"
+        cp ${LOCAL_CONTROLPLANE_DIR}/scaphandre/*.json \
+            "${LOCAL_EXP_DIR}/scaphandre/" 2>/dev/null && \
+            echo "  ✓ $LOCAL_NODE_NAME (local) — scaphandre JSON copiado" || \
+            echo "  ⚠ $LOCAL_NODE_NAME (local) — sin JSON de scaphandre"
     fi
 else
     echo "  ⚠ $LOCAL_NODE_NAME (local) — directorio no encontrado: $LOCAL_CONTROLPLANE_DIR"
 fi
 
 echo ""
-echo "[ Archivos recuperados: $TOTAL_FILES ]"
+echo "[ Archivos EcoFloc recuperados: $TOTAL_FILES ]"
 echo "✓ Colección completada — $LOCAL_EXP_DIR"

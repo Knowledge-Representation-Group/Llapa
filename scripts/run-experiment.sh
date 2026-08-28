@@ -1,7 +1,6 @@
 #!/usr/bin/env zsh
-# run-experiment.sh — Orquestador principal del experimento TeaStore + EcoFloc
+# run-experiment.sh — Orquestador principal del experimento TeaStore + EcoFloc/Kepler/Scaphandre
 # Uso: ./run-experiment.sh <experimento> <intervalo_ms> <componentes> [opciones]
-# Ejemplo: ./run-experiment.sh exp01 1000 cpu,ram,sd,nic --profile low
 
 set -euo pipefail
 
@@ -23,7 +22,7 @@ phase()   {
 }
 
 # ─── Cargar .env ──────────────────────────────────────────────────────────────
-[[ -f "$ENV_FILE" ]] || error "No se encontró .env en $SCRIPT_DIR"
+[[ -f "$ENV_FILE" ]] || error "No se encontró .env en $ENV_FILE"
 set -a; source "$ENV_FILE"; set +a
 
 # ─── Uso ──────────────────────────────────────────────────────────────────────
@@ -34,9 +33,18 @@ Uso: $0 <experimento> <intervalo_ms> <componentes> [opciones]
 Argumentos obligatorios:
   <experimento>           Nombre del experimento
   <intervalo_ms>          Intervalo de muestreo EcoFloc en ms (ej: 1000)
+                          Para scaphandre se convierte a segundos automáticamente
   <componentes>           Componentes EcoFloc: cpu,ram,sd,nic
+                          (ignorado si --monitor kepler o scaphandre)
 
-Parámetros BD (teastore-gendb):
+Monitorización:
+  --monitor <tool>        Herramienta(s): ecofloc | kepler | scaphandre |
+                          ecofloc,kepler | ecofloc,scaphandre | kepler,scaphandre |
+                          ecofloc,kepler,scaphandre
+                          (default: ecofloc)
+  --prom-url <url>        URL de Prometheus (default: http://localhost:9090)
+
+Parámetros BD:
   --categories <n>        Categorías (default: 5)
   --products <n>          Productos por categoría (default: 100)
   --users <n>             Usuarios (default: 100)
@@ -46,19 +54,22 @@ Perfil de carga LIMBO (elige uno):
   --profile <nombre>      Perfil predefinido: low | med | high | <nombre>.csv
   --max-rps <n>           Máximo req/s (perfil dinámico)
   --duration <s>          Duración en segundos (perfil dinámico)
-  --shape <forma>         linear | constant | steps (perfil dinámico)
+  --shape <forma>         linear | constant | steps
   --num-steps <n>         Escalones (solo si --shape steps, default: 5)
 
 Opciones LIMBO:
   --threads <n>           Threads (default: 128)
-  --warmup-duration <s>   Duración warmup en segundos (default: 30)
-  --warmup-pause <s>      Pausa tras warmup en segundos (default: 5)
-  --warmup-rate <r>       Carga durante warmup en req/s (default: 0.0)
+  --warmup-duration <s>   Duración warmup (default: 30)
+  --warmup-pause <s>      Pausa tras warmup (default: 5)
+  --warmup-rate <r>       Carga durante warmup (default: 0.0)
 
 Ejemplos:
-  $0 exp01 1000 cpu,ram --profile low
-  $0 exp02 1000 cpu,ram,sd,nic --profile high --categories 10 --products 200
-  $0 exp03 500 cpu,ram --max-rps 200 --duration 180 --shape linear
+  $0 exp01 5000 cpu,ram,sd,nic --profile low --monitor ecofloc
+  $0 exp02 5000 cpu,ram,sd,nic --profile low --monitor kepler
+  $0 exp03 5000 cpu,ram,sd,nic --profile low --monitor scaphandre
+  $0 exp04 5000 cpu,ram,sd,nic --profile low --monitor ecofloc,kepler
+  $0 exp05 5000 cpu,ram,sd,nic --profile low --monitor ecofloc,scaphandre
+  $0 exp06 5000 cpu,ram,sd,nic --profile low --monitor ecofloc,kepler,scaphandre
 EOF
     exit 0
 }
@@ -67,6 +78,8 @@ EOF
 EXPERIMENT=""
 INTERVAL_MS=""
 COMPONENTS=""
+MONITOR="ecofloc"
+PROM_URL="${PROM_URL:-http://localhost:9090}"
 CATEGORIES=5
 PRODUCTS=100
 USERS=100
@@ -89,23 +102,39 @@ COMPONENTS="$1"; shift
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --categories)      CATEGORIES="$2";      shift 2 ;;
-        --products)        PRODUCTS="$2";        shift 2 ;;
-        --users)           USERS="$2";           shift 2 ;;
-        --orders)          ORDERS="$2";          shift 2 ;;
-        --profile)         PROFILE="$2";         shift 2 ;;
-        --max-rps)         MAX_RPS="$2";         shift 2 ;;
-        --duration)        DURATION_S="$2";      shift 2 ;;
-        --shape)           SHAPE="$2";           shift 2 ;;
-        --num-steps)       NUM_STEPS="$2";       shift 2 ;;
-        --threads)         THREADS="$2";         shift 2 ;;
-        --warmup-duration) WARMUP_DURATION="$2"; shift 2 ;;
-        --warmup-pause)    WARMUP_PAUSE="$2";    shift 2 ;;
-        --warmup-rate)     WARMUP_RATE="$2";     shift 2 ;;
+        --monitor)         MONITOR="$2";          shift 2 ;;
+        --prom-url)        PROM_URL="$2";         shift 2 ;;
+        --categories)      CATEGORIES="$2";       shift 2 ;;
+        --products)        PRODUCTS="$2";         shift 2 ;;
+        --users)           USERS="$2";            shift 2 ;;
+        --orders)          ORDERS="$2";           shift 2 ;;
+        --profile)         PROFILE="$2";          shift 2 ;;
+        --max-rps)         MAX_RPS="$2";          shift 2 ;;
+        --duration)        DURATION_S="$2";       shift 2 ;;
+        --shape)           SHAPE="$2";            shift 2 ;;
+        --num-steps)       NUM_STEPS="$2";        shift 2 ;;
+        --threads)         THREADS="$2";          shift 2 ;;
+        --warmup-duration) WARMUP_DURATION="$2";  shift 2 ;;
+        --warmup-pause)    WARMUP_PAUSE="$2";     shift 2 ;;
+        --warmup-rate)     WARMUP_RATE="$2";      shift 2 ;;
         -h|--help)         usage ;;
         *) error "Parámetro desconocido: $1" ;;
     esac
 done
+
+# ─── Flags de monitor ─────────────────────────────────────────────────────────
+USE_ECOFLOC=false
+USE_KEPLER=false
+USE_SCAPHANDRE=false
+[[ "$MONITOR" == *"ecofloc"*     ]] && USE_ECOFLOC=true
+[[ "$MONITOR" == *"kepler"*      ]] && USE_KEPLER=true
+[[ "$MONITOR" == *"scaphandre"*  ]] && USE_SCAPHANDRE=true
+($USE_ECOFLOC || $USE_KEPLER || $USE_SCAPHANDRE) || \
+    error "--monitor debe contener: ecofloc, kepler, scaphandre (o combinación)"
+
+# Intervalo scaphandre en segundos (convierte desde ms)
+INTERVAL_S=$(( INTERVAL_MS / 1000 ))
+[[ "$INTERVAL_S" -lt 1 ]] && INTERVAL_S=1
 
 # ─── Validaciones ─────────────────────────────────────────────────────────────
 [[ -z "$EXPERIMENT" ]]  && error "Falta <experimento>"
@@ -114,28 +143,31 @@ done
 [[ -z "$PROFILE" && ( -z "$MAX_RPS" || -z "$DURATION_S" || -z "$SHAPE" ) ]] && \
     error "Debes especificar --profile O (--max-rps + --duration + --shape)"
 
-# ─── Scripts requeridos — rutas desde .env ────────────────────────────────────
+# ─── Scripts requeridos ───────────────────────────────────────────────────────
 SCRIPTS_DIR="$SCRIPT_DIR"
 DEPLOY_SCRIPT="$SCRIPTS_DIR/teastore-deploy.sh"
 GENDB_SCRIPT="$SCRIPTS_DIR/teastore-gendb.sh"
 ECOFLOC_WIDE="$SCRIPTS_DIR/run-ecofloc-wide.sh"
+SCAPH_WIDE="$SCRIPTS_DIR/run-scaphandre-wide.sh"
 COLLECT_SCRIPT="$SCRIPTS_DIR/collect-results.sh"
-LIMBO_SCRIPT="$SCRIPT_DIR/run-limbo.sh"
+LIMBO_SCRIPT="$SCRIPTS_DIR/run-limbo.sh"
+KEPLER_EXPORT="$SCRIPTS_DIR/export-kepler.sh"
 
-for S in "$DEPLOY_SCRIPT" "$GENDB_SCRIPT" "$ECOFLOC_WIDE" "$COLLECT_SCRIPT" "$LIMBO_SCRIPT"; do
+for S in "$DEPLOY_SCRIPT" "$GENDB_SCRIPT" "$COLLECT_SCRIPT" "$LIMBO_SCRIPT"; do
     [[ -f "$S" ]] || error "Script no encontrado: $S"
 done
+$USE_ECOFLOC     && { [[ -f "$ECOFLOC_WIDE"  ]] || error "Script no encontrado: $ECOFLOC_WIDE";  }
+$USE_KEPLER      && { [[ -f "$KEPLER_EXPORT" ]] || error "Script no encontrado: $KEPLER_EXPORT"; }
+$USE_SCAPHANDRE  && { [[ -f "$SCAPH_WIDE"    ]] || error "Script no encontrado: $SCAPH_WIDE";    }
 
 # ─── Directorio de resultados y metadata ──────────────────────────────────────
 RESULTS_DIR="$RESULTS_LOCAL_DIR/$EXPERIMENT"
 mkdir -p "$RESULTS_DIR"
 METADATA="$RESULTS_DIR/metadata.json"
 
-# ─── Función: guardar timestamp de fase ───────────────────────────────────────
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 save_phase_ts() {
-    local PHASE=$1
-    local KEY=$2
-    local TS=$3
+    local PHASE=$1 KEY=$2 TS=$3
     python3 - <<PYEOF
 import json, os
 path = "$METADATA"
@@ -146,10 +178,8 @@ with open(path, "w") as f:
 PYEOF
 }
 
-# ─── Función: enviar señal a todos los nodos ──────────────────────────────────
 _send_signal_to_all() {
-    local SIGNAL_FILE=$1
-    local SIGNAL_NAME=$2
+    local SIGNAL_FILE=$1 SIGNAL_NAME=$2
     local i=1
     while true; do
         local NAME_VAR="NODE_${i}_NAME"
@@ -163,26 +193,19 @@ _send_signal_to_all() {
         info "  → $SIGNAL_NAME enviado a $NAME ($IP)"
         (( i++ ))
     done
-    # También local (control-plane)
     touch "${RESULTS_REMOTE_DIR}/$EXPERIMENT/$SIGNAL_FILE"
-    info "  → $SIGNAL_NAME enviado a $(hostname 2>/dev/null || echo 'control-plane') (local)"
+    info "  → $SIGNAL_NAME enviado a $(cat /etc/hostname 2>/dev/null || echo 'control-plane') (local)"
 }
 
-stop_ecofloc() {
-    info "Enviando señal de parada a todos los nodos..."
-    _send_signal_to_all ".stop" "stop"
-}
-
-redetect_ecofloc() {
-    info "Enviando señal de re-detección a todos los nodos..."
-    _send_signal_to_all ".redetect" "redetect"
-}
+stop_ecofloc()     { info "Enviando señal stop...";      _send_signal_to_all ".stop"     "stop"     }
+redetect_ecofloc() { info "Enviando señal redetect...";  _send_signal_to_all ".redetect" "redetect" }
 
 # ─── Resumen inicial ──────────────────────────────────────────────────────────
 echo ""
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 info "  Experimento : $EXPERIMENT"
-info "  Intervalo   : ${INTERVAL_MS}ms"
+info "  Monitor     : $MONITOR"
+info "  Intervalo   : ${INTERVAL_MS}ms (scaphandre: ${INTERVAL_S}s)"
 info "  Componentes : $COMPONENTS"
 info "  BD          : cat=$CATEGORIES prod=$PRODUCTS usr=$USERS ord=$ORDERS"
 if [[ -n "$PROFILE" ]]; then
@@ -192,7 +215,6 @@ else
 fi
 info "  Warmup      : ${WARMUP_DURATION}s @ ${WARMUP_RATE} req/s + ${WARMUP_PAUSE}s pausa"
 info "  Threads     : $THREADS"
-info "  Scripts dir : $SCRIPTS_DIR"
 info "  Resultados  : $RESULTS_DIR"
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
@@ -201,18 +223,19 @@ echo ""
 python3 - <<PYEOF
 import json
 data = {
-    "experiment": "$EXPERIMENT",
-    "interval_ms": $INTERVAL_MS,
-    "components": "$COMPONENTS",
-    "profile": "${PROFILE:-${SHAPE}_${MAX_RPS}rps_${DURATION_S}s}",
+    "experiment":      "$EXPERIMENT",
+    "monitor":         "$MONITOR",
+    "interval_ms":     $INTERVAL_MS,
+    "components":      "$COMPONENTS",
+    "profile":         "${PROFILE:-${SHAPE}_${MAX_RPS}rps_${DURATION_S}s}",
     "warmup_duration": $WARMUP_DURATION,
-    "warmup_pause": $WARMUP_PAUSE,
-    "warmup_rate": $WARMUP_RATE,
+    "warmup_pause":    $WARMUP_PAUSE,
+    "warmup_rate":     $WARMUP_RATE,
     "db": {
         "categories": $CATEGORIES,
-        "products": $PRODUCTS,
-        "users": $USERS,
-        "orders": $ORDERS
+        "products":   $PRODUCTS,
+        "users":      $USERS,
+        "orders":     $ORDERS
     },
     "phases": {
         "deploy":   {"start_ts": None, "end_ts": None},
@@ -225,53 +248,78 @@ with open("$METADATA", "w") as f:
 print("  ✓ metadata.json inicializado")
 PYEOF
 
-# ─── Lanzar EcoFloc en todos los nodos (background) ──────────────────────────
-phase "ECOFLOC — INICIO"
-info "Lanzando EcoFloc en modo continuo en todos los nodos..."
-"$ECOFLOC_WIDE" "$EXPERIMENT" "$INTERVAL_MS" "$COMPONENTS" &
-ECOFLOC_PID=$!
-info "EcoFloc Wide PID: $ECOFLOC_PID"
+# ─── FASE: ECOFLOC INICIO ────────────────────────────────────────────────────
+if $USE_ECOFLOC; then
+    phase "ECOFLOC — INICIO"
+    info "Lanzando EcoFloc en modo continuo en todos los nodos..."
+    "$ECOFLOC_WIDE" "$EXPERIMENT" "$INTERVAL_MS" "$COMPONENTS" &
+    ECOFLOC_PID=$!
+    info "EcoFloc Wide PID: $ECOFLOC_PID"
+    info "Esperando 15s para estabilización..."
+    sleep 15
+    success "EcoFloc estabilizado"
+fi
 
-info "Esperando 15s para estabilización de EcoFloc (incluyendo NIC)..."
-sleep 15
-success "EcoFloc estabilizado — iniciando fases del experimento"
+# ─── FASE: SCAPHANDRE INICIO ─────────────────────────────────────────────────
+if $USE_SCAPHANDRE; then
+    phase "SCAPHANDRE — INICIO"
+    info "Lanzando Scaphandre en modo continuo en todos los nodos..."
+    "$SCAPH_WIDE" "$EXPERIMENT" "$INTERVAL_S" &
+    SCAPH_WIDE_PID=$!
+    info "Scaphandre Wide PID: $SCAPH_WIDE_PID"
+    info "Esperando 10s para estabilización..."
+    sleep 10
+    success "Scaphandre estabilizado"
+fi
+
+# ─── FASE: KEPLER VERIFICACIÓN ───────────────────────────────────────────────
+if $USE_KEPLER; then
+    phase "KEPLER — VERIFICACIÓN"
+    if ! curl -sf "${PROM_URL}/api/v1/query" --data-urlencode 'query=up' > /dev/null 2>&1; then
+        warn "Prometheus no accesible en $PROM_URL — abriendo port-forward..."
+        kubectl port-forward -n monitoring \
+            svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+        PROM_PF_PID=$!
+        sleep 5
+        curl -sf "${PROM_URL}/api/v1/query" --data-urlencode 'query=up' > /dev/null 2>&1 \
+            || error "Prometheus sigue inaccesible tras port-forward"
+    else
+        PROM_PF_PID=""
+    fi
+    success "Prometheus accesible en $PROM_URL"
+fi
 
 # ─── FASE: DEPLOY ─────────────────────────────────────────────────────────────
 phase "DEPLOY"
-
 DEPLOY_START=$(date +%s)
+DEPLOY_START_LOCAL=$(date '+%Y-%m-%d %H:%M:%S')
 save_phase_ts "deploy" "start_ts" "$DEPLOY_START"
-info "Deploy iniciado (ts=$DEPLOY_START)"
-
 bash "$DEPLOY_SCRIPT"
-
 DEPLOY_END=$(date +%s)
 save_phase_ts "deploy" "end_ts" "$DEPLOY_END"
-success "Deploy completado (ts=$DEPLOY_END, duración=$((DEPLOY_END - DEPLOY_START))s)"
+success "Deploy completado (${$(( DEPLOY_END - DEPLOY_START ))}s)"
 
-info "Solicitando re-detección de PIDs TeaStore en todos los nodos..."
-redetect_ecofloc
-sleep 15
+if $USE_ECOFLOC; then
+    info "Re-detección de PIDs TeaStore..."
+    redetect_ecofloc
+    sleep 15
+fi
 
 # ─── FASE: POPULATE ───────────────────────────────────────────────────────────
 phase "POPULATE"
-
 POPULATE_START=$(date +%s)
 save_phase_ts "populate" "start_ts" "$POPULATE_START"
-info "Populate iniciado (ts=$POPULATE_START)"
-
 bash "$GENDB_SCRIPT" "$CATEGORIES" "$PRODUCTS" "$USERS" "$ORDERS"
-
 POPULATE_END=$(date +%s)
 save_phase_ts "populate" "end_ts" "$POPULATE_END"
-success "Populate completado (ts=$POPULATE_END, duración=$((POPULATE_END - POPULATE_START))s)"
+success "Populate completado (${$(( POPULATE_END - POPULATE_START ))}s)"
 
 # ─── FASE: WORKLOAD ───────────────────────────────────────────────────────────
 phase "WORKLOAD"
-
 WORKLOAD_START=$(date +%s)
+WORKLOAD_START_LOCAL=$(date '+%Y-%m-%d %H:%M:%S')
 save_phase_ts "workload" "start_ts" "$WORKLOAD_START"
-info "Workload iniciado (ts=$WORKLOAD_START)"
+info "Workload iniciado: $WORKLOAD_START_LOCAL"
 
 LIMBO_ARGS=("$EXPERIMENT")
 if [[ -n "$PROFILE" ]]; then
@@ -286,32 +334,88 @@ LIMBO_ARGS+=(
     --warmup-pause    "$WARMUP_PAUSE"
     --warmup-rate     "$WARMUP_RATE"
 )
-
 "$LIMBO_SCRIPT" "${LIMBO_ARGS[@]}"
 
 WORKLOAD_END=$(date +%s)
+WORKLOAD_END_LOCAL=$(date '+%Y-%m-%d %H:%M:%S')
 save_phase_ts "workload" "end_ts" "$WORKLOAD_END"
-success "Workload completado (ts=$WORKLOAD_END, duración=$((WORKLOAD_END - WORKLOAD_START))s)"
+success "Workload completado: $WORKLOAD_END_LOCAL (${$(( WORKLOAD_END - WORKLOAD_START ))}s)"
 
 # ─── PARAR ECOFLOC ────────────────────────────────────────────────────────────
-phase "STOP ECOFLOC"
+if $USE_ECOFLOC; then
+    phase "STOP ECOFLOC"
+    stop_ecofloc
+    info "Esperando que EcoFloc termine..."
+    wait $ECOFLOC_PID 2>/dev/null || true
+    success "EcoFloc detenido"
+fi
 
-stop_ecofloc
-info "Esperando que EcoFloc termine en todos los nodos..."
-wait $ECOFLOC_PID 2>/dev/null || true
-success "EcoFloc detenido en todos los nodos"
+# ─── PARAR SCAPHANDRE ─────────────────────────────────────────────────────────
+if $USE_SCAPHANDRE; then
+    phase "STOP SCAPHANDRE"
+    info "Enviando señal stop a Scaphandre..."
+    # Reusar _send_signal_to_all — scaphandre también monitorea .stop
+    _send_signal_to_all ".stop" "stop"
+    info "Esperando que Scaphandre termine..."
+    wait $SCAPH_WIDE_PID 2>/dev/null || true
+    success "Scaphandre detenido"
+fi
 
-# ─── FASE: COLLECT ────────────────────────────────────────────────────────────
-phase "COLLECT"
+# ─── FASE: COLLECT ECOFLOC ────────────────────────────────────────────────────
+if $USE_ECOFLOC; then
+    phase "COLLECT — ECOFLOC"
+    "$COLLECT_SCRIPT" "$EXPERIMENT"
+fi
 
-"$COLLECT_SCRIPT" "$EXPERIMENT"
+# ─── FASE: COLLECT SCAPHANDRE ─────────────────────────────────────────────────
+if $USE_SCAPHANDRE; then
+    phase "COLLECT — SCAPHANDRE"
+    info "Recolectando JSONs de Scaphandre desde workers..."
+    local i=1
+    while true; do
+        local NAME_VAR="NODE_${i}_NAME"
+        local IP_VAR="NODE_${i}_IP"
+        local NAME="${(P)NAME_VAR:-}"
+        local IP="${(P)IP_VAR:-}"
+        [[ -z "$NAME" || -z "$IP" ]] && break
+        mkdir -p "$RESULTS_DIR/scaphandre"
+        sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no \
+            "${SSH_USER}@${IP}:${RESULTS_REMOTE_DIR}/${EXPERIMENT}/scaphandre/*.json" \
+            "$RESULTS_DIR/scaphandre/" 2>/dev/null && \
+            info "  ✓ JSON de $NAME copiado" || \
+            warn "  ⚠ No se pudo copiar JSON de $NAME"
+        (( i++ ))
+    done
+    # muaddib — ya está local
+    info "  ✓ JSON de muaddib ya disponible localmente"
+    success "Scaphandre JSONs recolectados en $RESULTS_DIR/scaphandre/"
+fi
+
+# ─── FASE: EXPORT KEPLER ──────────────────────────────────────────────────────
+if $USE_KEPLER; then
+    phase "COLLECT — KEPLER"
+    info "Exportando métricas Kepler..."
+    info "  Rango: $DEPLOY_START_LOCAL → $WORKLOAD_END_LOCAL"
+
+    PROM_URL="$PROM_URL" bash "$KEPLER_EXPORT" \
+        "$EXPERIMENT" \
+        "$DEPLOY_START_LOCAL" \
+        "$WORKLOAD_END_LOCAL"
+
+    if [[ -n "${PROM_PF_PID:-}" ]]; then
+        kill "$PROM_PF_PID" 2>/dev/null || true
+        info "Port-forward Prometheus cerrado"
+    fi
+fi
 
 # ─── RESUMEN FINAL ────────────────────────────────────────────────────────────
 echo ""
 success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-success "  Experimento completado: $EXPERIMENT"
-success "  Duración total: $((WORKLOAD_END - DEPLOY_START))s"
-success "  Metadata : $METADATA"
-success "  Resultados: $RESULTS_DIR"
+success "  Experimento completado : $EXPERIMENT"
+success "  Monitor                : $MONITOR"
+success "  Workload               : $WORKLOAD_START_LOCAL → $WORKLOAD_END_LOCAL"
+success "  Duración total         : $((WORKLOAD_END - DEPLOY_START))s"
+success "  Metadata               : $METADATA"
+success "  Resultados             : $RESULTS_DIR"
 success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""

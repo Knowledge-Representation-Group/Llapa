@@ -1,0 +1,13 @@
+# Llapa/prometheus-config/prom-values.yaml
+# Configuración kube-prometheus-stack para el clúster TeaStore + Kepler
+
+prometheus:
+  prometheusSpec:
+    retention: 90d
+    retentionSize: 10GB
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+
+grafana:
+  adminPassword: admin

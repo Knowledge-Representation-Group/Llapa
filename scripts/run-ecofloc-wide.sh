@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # ─── Cargar .env ──────────────────────────────────────────────────────────────
-ENV_FILE="${0:A:h}/../../.env"
+ENV_FILE="${0:A:h}/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
     echo "ERROR: no se encontró .env en ${0:A:h}"
     exit 1
