@@ -1,0 +1,26 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"monitoring.coreos.com/v1","kind":"ServiceMonitor","metadata":{"annotations":{},"labels":{"app.kubernetes.io/name":"kepler","release":"prometheus"},"name":"kepler","namespace":"kepler"},"spec":{"endpoints":[{"honorLabels":true,"interval":"5s","port":"http"}],"namespaceSelector":{"matchNames":["kepler"]},"selector":{"matchLabels":{"app.kubernetes.io/name":"kepler"}}}}
+  creationTimestamp: "2026-08-26T17:26:49Z"
+  generation: 1
+  labels:
+    app.kubernetes.io/name: kepler
+    release: prometheus
+  name: kepler
+  namespace: kepler
+  resourceVersion: "318447"
+  uid: acba04c0-44ee-408f-ab47-cd60623ce649
+spec:
+  endpoints:
+  - honorLabels: true
+    interval: 5s
+    port: http
+  namespaceSelector:
+    matchNames:
+    - kepler
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kepler
